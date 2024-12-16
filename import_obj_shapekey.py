@@ -340,7 +340,7 @@ def loadSequence(dir, file, fileExt, fileImporter, useObj=None):
     wm.progress_end()
     baseObjs[0].objsk_settings.numMeshes = len(unsorted_files)
     baseObjs[0].objsk_settings.initialized = True
-    bpy.ops.outliner.purge_orphans()
+    bpy.ops.outliner.orphans_purge()
     return (frame, baseObjs)
 
 
