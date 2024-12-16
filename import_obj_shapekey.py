@@ -2,6 +2,7 @@ import bpy
 import os
 import glob
 import re
+from pathlib import Path
 from bpy_extras.io_utils import (
     ImportHelper,
     orientation_helper,
@@ -13,7 +14,7 @@ bl_info = {
     "name": "OBJ Shape Keys",
     "description": "Import a sequence of OBJ (or STL, PLY) files and convert them to an animation using shape keys.",
     "author": "Alex Dahl",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (3, 2, 0),
     "location": "File > Import > OBJ Shape Keys",
     "category": "Import",
@@ -31,7 +32,7 @@ def alphanumKey(string):
         "z23a" -> ["z", 23, "a"]
     """
     return [int(c) if c.isdigit() else c for c in re.split('([0-9]+)', string)]
-        
+
 
 class MeshImporter(bpy.types.PropertyGroup):
     #OBJ settings
@@ -138,7 +139,42 @@ class MeshImporter(bpy.types.PropertyGroup):
                 use_scene_unit=self.ply_use_scene_unit,
                 forward_axis=forward,
                 up_axis=up)
+
+
+class MeshSequenceSettings(bpy.types.PropertyGroup):
+    initialized: bpy.props.BoolProperty(default=False)
+    dirPath: bpy.props.StringProperty(
+        name="Root Folder",
+        description="Only .OBJ files will be listed",
+        subtype="DIR_PATH")
+    fileExt: bpy.props.StringProperty(name='File Ext')
+    filePrefix: bpy.props.StringProperty(name='File Name Prefix')
+    numMeshes: bpy.props.IntProperty()
+    importSettings: bpy.props.PointerProperty(type=MeshImporter)
     
+    file_list: [str] = []
+    
+    def setFromImporter(self, imp):
+        self.importSettings.obj_global_scale = imp.obj_global_scale
+        self.importSettings.obj_use_groups_as_vgroups = imp.obj_use_groups_as_vgroups
+        self.importSettings.obj_global_clamp_size = imp.obj_global_clamp_size
+        self.importSettings.obj_use_split_objects = imp.obj_use_split_objects
+        self.importSettings.obj_use_split_groups = imp.obj_use_split_groups
+        self.importSettings.stl_global_scale = imp.stl_global_scale
+        self.importSettings.stl_use_scene_unit = imp.stl_use_scene_unit
+        self.importSettings.stl_use_facet_normal = imp.stl_use_facet_normal
+        self.importSettings.ply_global_scale = imp.ply_global_scale
+        self.importSettings.ply_use_scene_unit = imp.ply_use_scene_unit
+        self.importSettings.axis_forward = imp.axis_forward
+        self.importSettings.axis_up = imp.axis_up
+    
+    def checkFileList(self):
+        for f in self.file_list:
+            file = Path(f)
+            if not file.is_file():
+                return False
+        return True
+
 
 class SequenceImportSettings(bpy.types.PropertyGroup):
     fileNamePrefix: bpy.props.StringProperty(name='File Name')
@@ -150,7 +186,72 @@ class SequenceImportSettings(bpy.types.PropertyGroup):
         default = 'obj')
         
         
-def loadSequence(dir, file, fileExt, fileImporter):
+class ReloadMeshSequence(bpy.types.Operator):
+    """Delete and Reload Mesh Sequence"""
+    bl_idname = "objsk.reload_mesh_sequence"
+    bl_label = "Reload Mesh Sequence"
+    bl_options = {'UNDO'}
+
+    def execute(self, context):
+        obj = context.object
+        
+        #Check to make sure all files are still there
+        if not obj.objsk_settings.checkFileList():
+            self.report({'ERROR'}, "Files in sequence have been moved or deleted. Please reimport sequence.")
+            return {'CANCELLED'}
+        
+        import_settings = obj.objsk_settings.importSettings
+        
+        #delete object
+#        bpy.data.objects.remove(obj, do_unlink=True)
+        
+        #reimport
+        obj.objsk_settings.initialized = False
+        global_matrix = axis_conversion(from_forward=import_settings.axis_forward, from_up=import_settings.axis_up).to_4x4()
+        meshCount, seqObjs = loadSequence(obj.objsk_settings.dirPath, obj.objsk_settings.filePrefix, obj.objsk_settings.fileExt, obj.objsk_settings.importSettings, useObj=obj)
+        if meshCount == 0:
+            self.report({'ERROR'}, "No matching files found. Make sure the Root Folder, File Name, and File Format are correct.")
+            return {'CANCELLED'}
+        if meshCount < 0:
+            #use the other return as the string, bit of a hack
+            self.report({'ERROR'}, seqObjs)
+            return {'CANCELLED'}
+        
+        for seqObj in seqObjs:
+            seqObj.matrix_world = global_matrix
+            #update name
+#            meshName = os.path.splitext(seqObj.name)[0].rstrip('._0123456789')
+#            seqObj.name = meshName + '_shapekeys'
+        #set the frame to the start
+        context.scene.frame_set(1)
+        
+
+        return {'FINISHED'}
+
+
+class OBJShapeKeysPanel(bpy.types.Panel):
+    """Creates a Panel in the scene context of the properties editor"""
+    bl_label = "OBJ Shape Keys"
+    bl_idname = "OBJSK_PT_properties"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "object"
+    
+    @classmethod
+    def poll(cls, context):
+        return context.object.type == 'MESH' and context.object.objsk_settings.initialized == True
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.object
+        
+        row = layout.row()
+        row.label(text="Number of frames: " + str(obj.objsk_settings.numMeshes))
+        row = layout.row()
+        row.operator(ReloadMeshSequence.bl_idname)
+        
+        
+def loadSequence(dir, file, fileExt, fileImporter, useObj=None):
     full_dir = bpy.path.abspath(dir)
     full_path = os.path.join(full_dir, file+'*.'+fileExt)
     unsorted_files = glob.glob(full_path)
@@ -159,15 +260,27 @@ def loadSequence(dir, file, fileExt, fileImporter):
     import_files = sorted(unsorted_files, key=alphanumKey)
     #setup progress
     wm = bpy.context.window_manager
+    # half for import, half for keyframing
     wm.progress_begin(0, 2*len(import_files))
-    
     
     deselectAll()
     objSizes = []
     fileImporter.load(fileExt, import_files[0])
-    baseObjs = bpy.context.selected_objects # get newly imported object
-    count = 0
-    for baseObj in  baseObjs:
+    baseObjs = bpy.context.selected_objects # get newly imported 
+    if useObj is not None:
+        useObj.shape_key_clear()
+        #copy vertices from imported base into object just in case it's different
+        #TODO: figure out how to handle if there's multiple objs
+        #This will break if there's more than 1 object in the import files
+        if len(baseObjs) > 1:
+            return (-1, "Can't reload sequence with multiple meshes at this time.")
+        for baseObj in baseObjs:
+            for i in range(len(baseObj.data.vertices)):
+                useObj.data.vertices[i].co = baseObj.data.vertices[i].co
+        oldBase = baseObjs[0]
+        baseObjs = [useObj]
+        bpy.data.objects.remove(oldBase, do_unlink=True)
+    for baseObj in baseObjs:
         verts = baseObj.data.vertices # get vertices obj
         if len(verts) == 0:
             return (-1, "Imported object %d in %s has 0 vertices" % (count+1, import_files[0]))
@@ -175,6 +288,14 @@ def loadSequence(dir, file, fileExt, fileImporter):
         sk_basis = baseObj.shape_key_add(name='Basis', from_mix=False) # create base shape key
         sk_basis.interpolation = 'KEY_LINEAR'
         baseObj.data.shape_keys.use_relative = True
+    if useObj is None:
+        baseObjs[0].objsk_settings.setFromImporter(fileImporter)
+    baseObjs[0].objsk_settings.dirPath = dir
+    baseObjs[0].objsk_settings.fileExt = fileExt
+    baseObjs[0].objsk_settings.filePrefix = file
+    
+    for f in import_files:
+        baseObjs[0].objsk_settings.file_list.append(f)
     import_files.pop(0) # remove first element
 
     deselectAll()
@@ -217,6 +338,9 @@ def loadSequence(dir, file, fileExt, fileImporter):
                 sk.keyframe_insert('value', frame=i+1)
         wm.progress_update(frame+i)
     wm.progress_end()
+    baseObjs[0].objsk_settings.numMeshes = len(unsorted_files)
+    baseObjs[0].objsk_settings.initialized = True
+    bpy.ops.outliner.purge_orphans()
     return (frame, baseObjs)
 
 
@@ -359,22 +483,29 @@ def menu_func_import_sequence(self, context):
 
 def register():
     bpy.utils.register_class(MeshImporter)
+    bpy.utils.register_class(MeshSequenceSettings)
+    bpy.utils.register_class(ReloadMeshSequence)
+    bpy.types.Object.objsk_settings = bpy.props.PointerProperty(type=MeshSequenceSettings)
     #add option to import menu
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_sequence)
     #add in order to be drawn
     bpy.utils.register_class(SKO_PT_FileImportSettingsPanel)
     bpy.utils.register_class(SKO_PT_TransformSettingsPanel)
     bpy.utils.register_class(SKO_PT_SequenceImportSettingsPanel)
+    bpy.utils.register_class(OBJShapeKeysPanel)
     bpy.utils.register_class(SequenceImportSettings)
     bpy.utils.register_class(ImportObjShapeKeys)
 
     
 def unregister():
     bpy.utils.unregister_class(MeshImporter)
+    bpy.utils.unregister_class(MeshSequenceSettings)
+    bpy.utils.unregister_class(ReloadMeshSequence)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_sequence)
     bpy.utils.unregister_class(SKO_PT_FileImportSettingsPanel)
     bpy.utils.unregister_class(SKO_PT_TransformSettingsPanel)
     bpy.utils.unregister_class(SKO_PT_SequenceImportSettingsPanel)
+    bpy.utils.unregister_class(OBJShapeKeysPanel)
     bpy.utils.unregister_class(SequenceImportSettings)
     bpy.utils.unregister_class(ImportObjShapeKeys)
     
