@@ -194,6 +194,10 @@ class ReloadMeshSequence(bpy.types.Operator):
 
     def execute(self, context):
         obj = context.object
+        # print('Context Object: '+obj.name)
+        if not obj.objsk_settings.initialized:
+            self.report({'INFO'}, "Not an initialized obj shapekeys sequence, skipping")
+            return {'FINISHED'}
         
         #Check to make sure all files are still there
         if not obj.objsk_settings.checkFileList():
@@ -207,7 +211,9 @@ class ReloadMeshSequence(bpy.types.Operator):
         
         #reimport
         obj.objsk_settings.initialized = False
-        global_matrix = axis_conversion(from_forward=import_settings.axis_forward, from_up=import_settings.axis_up).to_4x4()
+        forward = import_settings.axis_forward.replace('NEGATIVE_', '-')
+        up = import_settings.axis_up.replace('NEGATIVE_', '-')
+        global_matrix = axis_conversion(from_forward=forward, from_up=up).to_4x4()
         meshCount, seqObjs = loadSequence(obj.objsk_settings.dirPath, obj.objsk_settings.filePrefix, obj.objsk_settings.fileExt, obj.objsk_settings.importSettings, useObj=obj)
         if meshCount == 0:
             self.report({'ERROR'}, "No matching files found. Make sure the Root Folder, File Name, and File Format are correct.")
@@ -256,6 +262,9 @@ def loadSequence(dir, file, fileExt, fileImporter, useObj=None):
     full_path = os.path.join(full_dir, file+'*.'+fileExt)
     unsorted_files = glob.glob(full_path)
     if len(unsorted_files) == 0:
+        print('No files found with search')
+        print('dir: '+full_dir)
+        print('path: '+full_path)
         return (0, None)
     import_files = sorted(unsorted_files, key=alphanumKey)
     #setup progress
